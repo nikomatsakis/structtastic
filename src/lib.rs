@@ -18,6 +18,8 @@ mod spawned;
 mod stream;
 
 pub use async_iter::{AsyncIterator, IntoAsyncIter};
+use scope::ScopeLocal;
+use scope_body::ScopeBodyLocal;
 pub use stream::Stream;
 
 /// Creates an async scope within which you can spawn jobs.
@@ -144,7 +146,24 @@ macro_rules! async_scope {
     }};
 }
 
-use futures::future::BoxFuture;
+/// See [`async_scope`] for details.
+#[macro_export]
+macro_rules! async_scope_local {
+    (|$scope:ident| -> $result:ty { $($body:tt)* }) => {{
+        $crate::scope_fn_local::<$result, _>(|$scope| {
+            let future = async { $($body)* };
+            Box::pin(future)
+        })
+    }};
+    (|$scope:ident| $body:expr) => {{
+        $crate::scope_fn_local(|$scope| {
+            let future = async { $body };
+            Box::pin(future)
+        })
+    }};
+}
+
+use futures::future::{BoxFuture, LocalBoxFuture};
 
 pub use self::scope::Scope;
 pub use self::scope_body::ScopeBody;
@@ -168,6 +187,25 @@ where
     ScopeBody::new(body::Body::new(body_future, scope))
 }
 
+/// Creates a new moro scope that is not thread-safe.
+/// Normally, you invoke this through `moro::async_scope_local!`.
+pub fn scope_fn_local<'env, R, B>(body: B) -> ScopeBodyLocal<'env, R, LocalBoxFuture<'env, R>>
+where
+    R: 'env,
+    for<'scope> B: FnOnce(&'scope ScopeLocal<'scope, 'env, R>) -> LocalBoxFuture<'scope, R>,
+{
+    let scope = ScopeLocal::new();
+
+    // Unsafe: We are letting the body use the `Rc<ScopeLocal>` without reference
+    // counting. The reference is held by `BodyLocal` below. `BodyLocal` will not drop
+    // the `Rc` until the body_future is dropped, and the output `T` has to outlive
+    // `'env` so it can't reference `scope`, so this should be ok.
+    let scope_ref: *const ScopeLocal<'_, '_, R> = &*scope;
+    let body_future = body(unsafe { &*scope_ref });
+
+    ScopeBodyLocal::new(body::BodyLocal::new(body_future, scope))
+}
+
 /// Creates a new moro scope.
 pub fn scope<'env, R, B>(
     body: B,
@@ -186,4 +224,24 @@ where
     let body_future = body(unsafe { &*scope_ref });
 
     ScopeBody::new(body::Body::new(body_future, scope))
+}
+
+/// Creates a new moro scope that is not thread-safe.
+pub fn scope_local<'env, R, B>(
+    body: B,
+) -> ScopeBodyLocal<'env, R, <B as AsyncFnOnce<(&'env ScopeLocal<'env, 'env, R>,)>>::CallOnceFuture>
+where
+    R: 'env,
+    for<'scope> B: async FnOnce(&'scope ScopeLocal<'scope, 'env, R>) -> R,
+{
+    let scope = ScopeLocal::new();
+
+    // Unsafe: We are letting the body use the `Rc<ScopeLocal>` without reference
+    // counting. The reference is held by `BodyLocal` below. `BodyLocal` will not drop
+    // the `Rc` until the body_future is dropped, and the output `T` has to outlive
+    // `'env` so it can't reference `scope`, so this should be ok.
+    let scope_ref: *const ScopeLocal<'_, '_, R> = &*scope;
+    let body_future = body(unsafe { &*scope_ref });
+
+    ScopeBodyLocal::new(body::BodyLocal::new(body_future, scope))
 }
